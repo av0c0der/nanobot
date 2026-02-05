@@ -26,42 +26,43 @@ def _markdown_to_telegram_html(text: str) -> str:
     def save_code_block(m: re.Match) -> str:
         code_blocks.append(m.group(1))
         return f"\x00CB{len(code_blocks) - 1}\x00"
-    
-    text = re.sub(r'```[\w]*\n?([\s\S]*?)```', save_code_block, text)
-    
+
+    text = re.sub(r"```[\w]*\n?([\s\S]*?)```", save_code_block, text)
+
     # 2. Extract and protect inline code
     inline_codes: list[str] = []
+
     def save_inline_code(m: re.Match) -> str:
         inline_codes.append(m.group(1))
         return f"\x00IC{len(inline_codes) - 1}\x00"
-    
-    text = re.sub(r'`([^`]+)`', save_inline_code, text)
-    
+
+    text = re.sub(r"`([^`]+)`", save_inline_code, text)
+
     # 3. Headers # Title -> just the title text
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'\1', text, flags=re.MULTILINE)
-    
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"\1", text, flags=re.MULTILINE)
+
     # 4. Blockquotes > text -> just the text (before HTML escaping)
-    text = re.sub(r'^>\s*(.*)$', r'\1', text, flags=re.MULTILINE)
-    
+    text = re.sub(r"^>\s*(.*)$", r"\1", text, flags=re.MULTILINE)
+
     # 5. Escape HTML special characters
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    
+
     # 6. Links [text](url) - must be before bold/italic to handle nested cases
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
-    
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
     # 7. Bold **text** or __text__
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
-    
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
     # 8. Italic _text_ (avoid matching inside words like some_var_name)
-    text = re.sub(r'(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])', r'<i>\1</i>', text)
-    
+    text = re.sub(r"(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])", r"<i>\1</i>", text)
+
     # 9. Strikethrough ~~text~~
-    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
-    
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
     # 10. Bullet lists - item -> • item
-    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
-    
+    text = re.sub(r"^[-*]\s+", "• ", text, flags=re.MULTILINE)
+
     # 11. Restore inline code with HTML tags
     for i, code in enumerate(inline_codes):
         # Escape HTML in code content
@@ -102,18 +103,20 @@ class TelegramChannel(BaseChannel):
         self._running = True
         
         # Build the application
-        self._app = (
-            Application.builder()
-            .token(self.config.token)
-            .build()
-        )
-        
+        self._app = Application.builder().token(self.config.token).build()
+
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
             MessageHandler(
-                (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL) 
-                & ~filters.COMMAND, 
-                self._on_message
+                (
+                    filters.TEXT
+                    | filters.PHOTO
+                    | filters.VOICE
+                    | filters.AUDIO
+                    | filters.Document.ALL
+                )
+                & ~filters.COMMAND,
+                self._on_message,
             )
         )
         
@@ -134,7 +137,7 @@ class TelegramChannel(BaseChannel):
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
             allowed_updates=["message"],
-            drop_pending_updates=True  # Ignore old messages on startup
+            drop_pending_updates=True,  # Ignore old messages on startup
         )
         
         # Keep running until stopped
@@ -163,21 +166,35 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML"
-            )
+
+            # Build kwargs for send_message
+            send_kwargs = {"chat_id": chat_id, "text": html_content, "parse_mode": "HTML"}
+
+            # Add message_thread_id if targeting a forum topic
+            if msg.thread_id:
+                try:
+                    send_kwargs["message_thread_id"] = int(msg.thread_id)
+                except ValueError:
+                    logger.warning(f"Invalid thread_id: {msg.thread_id}")
+
+            await self._app.bot.send_message(**send_kwargs)
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
             # Fallback to plain text if HTML parsing fails
             logger.warning(f"HTML parse failed, falling back to plain text: {e}")
             try:
-                await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content
-                )
+                # Build kwargs for fallback send_message
+                send_kwargs = {"chat_id": int(msg.chat_id), "text": msg.content}
+
+                # Add message_thread_id if targeting a forum topic
+                if msg.thread_id:
+                    try:
+                        send_kwargs["message_thread_id"] = int(msg.thread_id)
+                    except ValueError:
+                        logger.warning(f"Invalid thread_id: {msg.thread_id}")
+
+                await self._app.bot.send_message(**send_kwargs)
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
     
@@ -188,8 +205,7 @@ class TelegramChannel(BaseChannel):
         
         user = update.effective_user
         await update.message.reply_text(
-            f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
-            "Send me a message and I'll respond!"
+            f"👋 Hi {user.first_name}! I'm nanobot.\n\nSend me a message and I'll respond!"
         )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,7 +216,8 @@ class TelegramChannel(BaseChannel):
         message = update.message
         user = update.effective_user
         chat_id = message.chat_id
-        
+        thread_id = message.message_thread_id  # Extract forum topic ID if present
+
         # Use stable numeric ID, but keep username for allowlist compatibility
         sender_id = str(user.id)
         if user.username:
@@ -209,7 +226,10 @@ class TelegramChannel(BaseChannel):
         # Show typing indicator as soon as we get the message
         if self.is_allowed(sender_id):
             try:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                send_kwargs = {"chat_id": chat_id, "action": ChatAction.TYPING}
+                if thread_id:
+                    send_kwargs["message_thread_id"] = thread_id
+                await context.bot.send_chat_action(**send_kwargs)
             except Exception as e:
                 logger.debug(f"Failed to send typing indicator: {e}")
         
@@ -247,10 +267,11 @@ class TelegramChannel(BaseChannel):
         if media_file and self._app:
             try:
                 file = await self._app.bot.get_file(media_file.file_id)
-                ext = self._get_extension(media_type, getattr(media_file, 'mime_type', None))
-                
+                ext = self._get_extension(media_type, getattr(media_file, "mime_type", None))
+
                 # Save to workspace/media/
                 from pathlib import Path
+
                 media_dir = Path.home() / ".nanobot" / "media"
                 media_dir.mkdir(parents=True, exist_ok=True)
                 
@@ -262,6 +283,7 @@ class TelegramChannel(BaseChannel):
                 # Handle voice transcription
                 if media_type == "voice" or media_type == "audio":
                     from nanobot.providers.transcription import GroqTranscriptionProvider
+
                     transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
                     transcription = await transcriber.transcribe(file_path)
                     if transcription:
@@ -287,21 +309,27 @@ class TelegramChannel(BaseChannel):
             chat_id=str(chat_id),
             content=content,
             media=media_paths,
+            thread_id=str(thread_id) if thread_id else None,
             metadata={
                 "message_id": message.message_id,
                 "user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
-                "is_group": message.chat.type != "private"
-            }
+                "is_group": message.chat.type != "private",
+                "thread_id": thread_id,
+            },
         )
-    
+
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:
         """Get file extension based on media type."""
         if mime_type:
             ext_map = {
-                "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
-                "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "audio/ogg": ".ogg",
+                "audio/mpeg": ".mp3",
+                "audio/mp4": ".m4a",
             }
             if mime_type in ext_map:
                 return ext_map[mime_type]

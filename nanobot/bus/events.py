@@ -16,10 +16,13 @@ class InboundMessage:
     timestamp: datetime = field(default_factory=datetime.now)
     media: list[str] = field(default_factory=list)  # Media URLs
     metadata: dict[str, Any] = field(default_factory=dict)  # Channel-specific data
-    
+    thread_id: str | None = None  # Telegram forum topic ID
+
     @property
     def session_key(self) -> str:
         """Unique key for session identification."""
+        if self.thread_id:
+            return f"{self.channel}:{self.chat_id}:{self.thread_id}"
         return f"{self.channel}:{self.chat_id}"
 
 
@@ -33,5 +36,4 @@ class OutboundMessage:
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
+    thread_id: str | None = None  # Telegram forum topic ID

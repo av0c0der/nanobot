@@ -59,22 +59,22 @@ class SubagentManager:
             label: Optional human-readable label for the task.
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
-        
+            origin_thread_id: Optional forum topic ID (Telegram).
+
         Returns:
             Status message indicating the subagent was started.
         """
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        
+
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
+            "thread_id": origin_thread_id,
         }
-        
+
         # Create background task
-        bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
-        )
+        bg_task = asyncio.create_task(self._run_subagent(task_id, task, display_label, origin))
         self._running_tasks[task_id] = bg_task
         
         # Cleanup when done
@@ -141,22 +141,26 @@ class SubagentManager:
                         }
                         for tc in response.tool_calls
                     ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                    })
-                    
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": tool_call_dicts,
+                        }
+                    )
+
                     # Execute tools
                     for tool_call in response.tool_calls:
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name}")
                         result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
                 else:
                     final_result = response.content
                     break
@@ -178,12 +182,12 @@ class SubagentManager:
         label: str,
         task: str,
         result: str,
-        origin: dict[str, str],
+        origin: dict[str, str | None],
         status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
-        
+
         announce_content = f"""[Subagent '{label}' {status_text}]
 
 Task: {task}
@@ -192,18 +196,23 @@ Result:
 {result}
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
-        
+
+        # Build chat_id with optional thread_id for routing back to the original context
+        chat_id = f"{origin['channel']}:{origin['chat_id']}"
+        if origin.get("thread_id"):
+            chat_id = f"{chat_id}:{origin['thread_id']}"
+
         # Inject as system message to trigger main agent
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
-            chat_id=f"{origin['channel']}:{origin['chat_id']}",
+            chat_id=chat_id,
             content=announce_content,
         )
-        
+
         await self.bus.publish_inbound(msg)
-        logger.debug(f"Subagent [{task_id}] announced result to {origin['channel']}:{origin['chat_id']}")
-    
+        logger.debug(f"Subagent [{task_id}] announced result to {chat_id}")
+
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
         return f"""# Subagent

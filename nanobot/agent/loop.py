@@ -109,11 +109,8 @@ class AgentLoop:
         while self._running:
             try:
                 # Wait for next message
-                msg = await asyncio.wait_for(
-                    self.bus.consume_inbound(),
-                    timeout=1.0
-                )
-                
+                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+
                 # Process it
                 try:
                     response = await self._process_message(msg)
@@ -122,11 +119,14 @@ class AgentLoop:
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     # Send error response
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            thread_id=msg.thread_id,
+                            content=f"Sorry, I encountered an error: {str(e)}",
+                        )
+                    )
             except asyncio.TimeoutError:
                 continue
     
@@ -158,12 +158,12 @@ class AgentLoop:
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
-            message_tool.set_context(msg.channel, msg.chat_id)
-        
+            message_tool.set_context(msg.channel, msg.chat_id, msg.thread_id)
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+            spawn_tool.set_context(msg.channel, msg.chat_id, msg.thread_id)
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -180,9 +180,7 @@ class AgentLoop:
             
             # Call LLM
             response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
+                messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
             
             # Handle tool calls
@@ -194,8 +192,8 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
-                        }
+                            "arguments": json.dumps(tc.arguments),  # Must be JSON string
+                        },
                     }
                     for tc in response.tool_calls
                 ]
@@ -230,49 +228,51 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=final_content
+            channel=msg.channel, chat_id=msg.chat_id, thread_id=msg.thread_id, content=final_content
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
-        
-        The chat_id field contains "original_channel:original_chat_id" to route
-        the response back to the correct destination.
+
+        The chat_id field contains "original_channel:original_chat_id:thread_id" to route
+        the response back to the correct destination. Thread_id is optional.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
-        
-        # Parse origin from chat_id (format: "channel:chat_id")
-        if ":" in msg.chat_id:
-            parts = msg.chat_id.split(":", 1)
+
+        # Parse origin from chat_id (format: "channel:chat_id" or "channel:chat_id:thread_id")
+        parts = msg.chat_id.split(":")
+        if len(parts) >= 2:
             origin_channel = parts[0]
             origin_chat_id = parts[1]
+            origin_thread_id = parts[2] if len(parts) > 2 else None
         else:
             # Fallback
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
-        
+            origin_thread_id = None
+
         # Use the origin session for context
-        session_key = f"{origin_channel}:{origin_chat_id}"
+        if origin_thread_id:
+            session_key = f"{origin_channel}:{origin_chat_id}:{origin_thread_id}"
+        else:
+            session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
-            message_tool.set_context(origin_channel, origin_chat_id)
-        
+            message_tool.set_context(origin_channel, origin_chat_id, origin_thread_id)
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+            spawn_tool.set_context(origin_channel, origin_chat_id, origin_thread_id)
+
         # Build messages with the announce content
         messages = self.context.build_messages(
-            history=session.get_history(),
-            current_message=msg.content
+            history=session.get_history(), current_message=msg.content
         )
         
         # Agent loop (limited for announce handling)
@@ -283,9 +283,7 @@ class AgentLoop:
             iteration += 1
             
             response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
+                messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
             
             if response.has_tool_calls:
@@ -293,10 +291,7 @@ class AgentLoop:
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                        }
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
                     }
                     for tc in response.tool_calls
                 ]
@@ -333,7 +328,8 @@ class AgentLoop:
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
-            content=final_content
+            thread_id=origin_thread_id,
+            content=final_content,
         )
     
     async def process_direct(self, content: str, session_key: str = "cli:direct") -> str:
@@ -347,12 +343,7 @@ class AgentLoop:
         Returns:
             The agent's response.
         """
-        msg = InboundMessage(
-            channel="cli",
-            sender_id="user",
-            chat_id="direct",
-            content=content
-        )
-        
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content=content)
+
         response = await self._process_message(msg)
         return response.content if response else ""

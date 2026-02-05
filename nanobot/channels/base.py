@@ -87,7 +87,8 @@ class BaseChannel(ABC):
         chat_id: str,
         content: str,
         media: list[str] | None = None,
-        metadata: dict[str, Any] | None = None
+        metadata: dict[str, Any] | None = None,
+        thread_id: str | None = None,
     ) -> None:
         """
         Handle an incoming message from the chat platform.
